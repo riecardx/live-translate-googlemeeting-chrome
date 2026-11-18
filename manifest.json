@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "Meet Live Translate Sidebar",
+  "version": "0.1.9",
+  "description": "Google Meet captions and Qwen MT live translations in a Chrome side panel.",
+  "permissions": [
+    "sidePanel",
+    "storage",
+    "tabs",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://meet.google.com/*",
+    "http://127.0.0.1:18765/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "side_panel": {
+    "default_path": "panel.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://meet.google.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "action": {
+    "default_title": "Open Meet Live Translate"
+  }
+}

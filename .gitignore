@@ -1,0 +1,21 @@
+# Private local translation service: not part of the public Chrome extension
+/bridge.py
+/start-bridge.bat
+/test_bridge.py
+/apikey-*.csv
+/*api*key*.json
+/.env
+/.env.*
+/config.local.*
+/secrets.*
+/private/
+/credentials/
+
+# Python/Node generated files
+__pycache__/
+*.pyc
+*.pyo
+node_modules/
+*.log
+.DS_Store
+Thumbs.db

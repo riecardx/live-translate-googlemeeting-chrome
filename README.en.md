@@ -26,22 +26,6 @@
 3. Join a Google Meet meeting and enable **CC / Captions**. Click the extension icon to open Chrome's native right-side panel. You can pin the extension icon for easier access.
 4. Set the caption language and translation target (Chinese, Japanese, English, or Korean). `auto` means the translation model automatically detects the source language; it **does not** change the caption-recognition language configured in Google Meet.
 
-## Features, behavior, and limitations
-
-- **v0.1.9 paired hover:** Hovering an original-caption row or its translation highlights both corresponding rows. The highlighting remains while the pointer stays there and clears when it leaves. It persists through redraws caused by caption revisions. Clicking a row still makes its counterpart flash twice.
-- **v0.1.8 fixed-control filtering:** Meet navigation controls such as `arrow_downward 一番下に移動` (“scroll to bottom”) are excluded at both DOM and text levels. The filtering is narrow enough to preserve nearby genuine speech. The `test_ui_controls.cjs` regression test covers this behavior.
-- **v0.1.7 empty-caption fallback:** If Meet no longer uses the expected CSS classes, the capture script scans visible leaf text nodes inside the identified caption region. It associates adjacent speaker labels with their utterances rather than concatenating the entire caption area into one transcript. Actual Meet markup can change, so a real meeting test is still necessary.
-- **v0.1.6 caption grouping:** Captions are recorded per independent Meet message/speaker node. If a returning speaker creates a new message node, that becomes a new entry. Long utterances are split into segments of at most approximately 200 characters; their unfinished parts can be revised independently. Ambiguous markup is handled conservatively to avoid merging an entire meeting transcript into a single request.
-- **Caption corrections:** When Meet revises or extends an existing caption, the previous translation stays visible with an `更新中…` (“updating”) indicator. A successful newer result replaces it; failed or skipped updates leave the prior readable translation in place. Stale responses cannot overwrite a newer caption version.
-- **Speakers and paired navigation:** Both panes show the speaker's name if available from Meet (otherwise `未知发言人`, meaning “unknown speaker”). Corresponding rows share an internal ID. Scrolling either pane aligns matching rows in the other; hovering highlights both, and clicking flashes the counterpart twice. Browsing older entries temporarily pauses auto-follow until you return to the bottom or toggle the follow-latest checkbox off and on.
-- **Caption source:** The extension observes text already rendered on the Meet page. It **does not** record microphone audio or use Qwen ASR. It prioritizes accessible caption regions with legacy selectors as fallbacks and can inject its content script into an already-open Meet tab. The panel displays capture status.
-- **Update detection:** A MutationObserver scans after roughly **90 ms** of debounce, with a **1-second** fallback scan. Each row tracks its caption text and chosen language pair as a translation version. Unchanged versions are not retranslated.
-- **Translation scheduling:** Changed rows become eligible after approximately **1 second**, plus a short **90 ms** coalescing period. Only **one HTTP translation request** is in flight at any time. The newest eligible caption takes priority, with a queue of at most roughly **6 pending jobs** and expiration of stale jobs after **12 seconds**.
-- **Meet configuration:** CC captions must be enabled in Google Meet. Change recognition language in Meet itself.
-- **History:** Up to **150 caption records** are kept in memory while the side panel is open. The extension does not persist transcripts locally. The caption text may be sent to the translation API selected by the user.
-- **Local bridge:** The author's private implementation binds to `127.0.0.1` and checks extension origins and a custom header. Your implementation must provide its own appropriate security controls and remain running during the meeting.
-- **Publication:** Do not publish API keys or private configuration. Review security before distributing the extension through the Chrome Web Store.
-
 ## Project files
 
 - `content.js`: monitors live Meet caption DOM nodes and reports updates.

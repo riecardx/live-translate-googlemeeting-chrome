@@ -29,7 +29,55 @@
     return false;
   }
   const nodeIds = new WeakMap(), sent = new Map();
+  // Speaker names are metadata, never captions. Keep names seen across DOM updates,
+  // because Meet frequently renders the name slightly before the spoken text.
+  const knownSpeakers = new Set();
+  const NAME_ONLY_CJK = /^[\p{Script=Han}]{2,6}$/u;
+  function rememberSpeaker(name){
+    const n=clean(name);
+    if(n && n.length<=80)knownSpeakers.add(n);
+  }
+  function speakerLabel(node){
+    return !!node?.matches?.(SPEAKER_SELECTOR+',h1,h2,h3,h4,h5,h6,[data-speaker]');
+  }
+  function isSpeakerOnly(text,node){
+    const t=clean(text);
+    if(!t)return false;
+    if(knownSpeakers.has(t))return true;
+    if(speakerLabel(node))return true;
+    return false;
+  }
   let nextNodeId = 0, timer = null, scanCount = 0, lastCaptionAt = 0, lastRegions = 0, lastCandidates = 0;
+  let captureInterval = null, observer = null, contextDead = false;
+  function stopCapture() {
+    if (contextDead) return;
+    contextDead = true;
+    clearTimeout(timer);
+    clearInterval(captureInterval);
+    observer?.disconnect();
+    globalThis.__meetLiveTranslateInstalled = false;
+  }
+  function contextAlive() {
+    if (contextDead) return false;
+    try {
+      if (chrome?.runtime?.id) return true;
+    } catch (_error) {
+      // Chrome throws from runtime.id itself after an extension reload.
+    }
+    stopCapture();
+    return false;
+  }
+  function safeSend(message) {
+    if (!contextAlive()) return;
+    try {
+      const promise = chrome.runtime.sendMessage(message);
+      if (promise?.catch) promise.catch(error => {
+        if (/Extension context invalidated/i.test(String(error?.message || error))) stopCapture();
+      });
+    } catch (error) {
+      if (/Extension context invalidated/i.test(String(error?.message || error))) stopCapture();
+    }
+  }
   function visible(n) {
     if (!n || !n.isConnected) return false;
     const r = n.getBoundingClientRect();
@@ -55,8 +103,10 @@
     const text = clean(bodies.length
       ? bodies.map(n => n.innerText || n.textContent).join(' ')
       : (row.innerText || row.textContent || '').split(/\n+/).map(clean).filter(s=>s!==speaker).join(' '));
+    if(speaker)rememberSpeaker(speaker);
     if (!text || text === speaker || text.length > 1200 || isUiAction(text) || insideUiControl(row)) return null;
     if (row.querySelectorAll(SPEAKER_SELECTOR).length > 1) return null;
+    if(isSpeakerOnly(text,row))return null;
     return {node:row, speaker, text};
   }
   function explicitCandidates(root) {
@@ -122,19 +172,32 @@
     const leaves=textLeaves(root);
     const result=[];
     let speaker='';
+    // First pass: identify all speaker labels (including names at the end of a
+    // partially rendered Meet caption area) before emitting any speech.
+    for(let i=0;i<leaves.length;i++){
+      const current=leaves[i],next=leaves[i+1];
+      if(speakerLabel(current.node) || (next && likelySpeaker(current.text,next.text)))
+        rememberSpeaker(current.text);
+    }
     // Detect adjacent speaker/body leaves. Each body gets its own stable node ID.
     for(let i=0;i<leaves.length;i++){
       const current=leaves[i],next=leaves[i+1];
-      if(next && likelySpeaker(current.text,next.text)){
+      if(isSpeakerOnly(current.text,current.node)){
         speaker=current.text;
         continue;
       }
-      // Exclude header-like labels if another body is not yet present.
+      if(next && likelySpeaker(current.text,next.text)){
+        speaker=current.text;rememberSpeaker(speaker);
+        continue;
+      }
       if(/^(Captions|字幕|CC)$/i.test(current.text) || isUiAction(current.text) || insideUiControl(current.node))continue;
+      // A standalone 2–6 Han-character name with no speaker, at the edge
+      // of a partial DOM update, is ambiguous. Hold it rather than
+      // transmitting a person's name as a new speech caption.
+      if(!speaker && !next && NAME_ONLY_CJK.test(current.text))continue;
       result.push({node:current.node,speaker,text:current.text});
     }
-    // No strong speaker identity? Still display isolated caption text rather than blank.
-    // Never join leaves: separate nodes cannot accidentally become a whole transcript.
+    // Never join leaves: separate nodes cannot accidentally become a transcript.
     return result.slice(-12);
   }
   function splitCaption(text) {
@@ -153,8 +216,14 @@
     return parts;
   }
   function capture() {
+    if (contextDead) return;
+    if (!contextAlive()) return;
     scanCount++;
     const regions=roots();lastRegions=regions.length;
+    // Learn all explicit speaker labels first, before any root's fallback runs.
+    for(const region of regions)
+      for(const label of region.querySelectorAll(SPEAKER_SELECTOR))
+        if(visible(label))rememberSpeaker(label.innerText||label.textContent);
     let emitted=0,found=0;
     const used=new Set();
     for(const root of regions){
@@ -162,28 +231,32 @@
       const candidates=structured.length?structured:fallbackCandidates(root);
       for(const candidate of candidates){
         if(!candidate.text || isUiAction(candidate.text) || insideUiControl(candidate.node) || used.has(candidate.node))continue;
+        if(isSpeakerOnly(candidate.text,candidate.node))continue;
         used.add(candidate.node);found++;
         for(const [index,text] of splitCaption(candidate.text).entries()){
           if(!text || text===candidate.speaker)continue;
           const id='meet:'+idOf(candidate.node)+':'+candidate.speaker+':'+index;
           if(sent.get(id)===text)continue;
           sent.set(id,text);lastCaptionAt=Date.now();emitted++;
-          chrome.runtime.sendMessage({type:'CAPTION',payload:{
+          safeSend({type:'CAPTION',payload:{
             id,text,speaker:candidate.speaker,at:lastCaptionAt
-          }}).catch(()=>{});
+          }});
         }
       }
     }
     lastCandidates=found;
-    if(scanCount%4===1)chrome.runtime.sendMessage({type:'CAPTURE_STATUS',payload:{
+    if(scanCount%4===1)safeSend({type:'CAPTURE_STATUS',payload:{
       containers:lastRegions,found,lastCaptionAt,at:Date.now()
-    }}).catch(()=>{});
+    }});
     if(sent.size>600)for(const k of [...sent.keys()].slice(0,300))sent.delete(k);
   }
   chrome.runtime.onMessage.addListener((msg,_sender,reply)=>{
     if(msg?.type==='CAPTURE_PING')reply({ok:true,containers:lastRegions,found:lastCandidates,lastCaptionAt});
   });
-  new MutationObserver(()=>{clearTimeout(timer);timer=setTimeout(capture,90);})
-    .observe(document.documentElement,{subtree:true,childList:true,characterData:true});
-  setInterval(capture,1000);capture();
+  observer = new MutationObserver(()=>{
+    if (contextDead) return;
+    clearTimeout(timer);timer=setTimeout(capture,90);
+  });
+  observer.observe(document.documentElement,{subtree:true,childList:true,characterData:true});
+  captureInterval=setInterval(capture,1000);capture();
 })();

@@ -1,9 +1,9 @@
 // Meet captions and matching translated rows share stable entry IDs.
 const $=id=>document.getElementById(id);
 const TRANSLATE_INTERVAL_MS=1000, MAX=150, MAX_QUEUE_AGE_MS=12000, MAX_PENDING_JOBS=6;
-let meetTab=null,entries=[],nextId=0,generation=0;
+let meetTab=null,entries=[],sessionEntries=[],nextId=0,generation=0;
 const pending=new Map();
-let syncLock=false, syncRelease=0, manualBrowsing=false;
+let syncLock=false, syncRelease=0, manualBrowsing=false, followFrame=0;
 let hoveredEntryId=null;
 // Update just the matching row classes, without redrawing or touching scrolling.
 function setHoveredEntry(id){
@@ -29,11 +29,37 @@ for(const paneId of ['original','translated']){
 }
 const panes=()=>[$('original'),$('translated')];
 function bottom(el){return el.scrollHeight-el.clientHeight-el.scrollTop<=28;}
-function followLatest(){
+function scrollToLatest(){
   if(!$('follow').checked||manualBrowsing)return;
   syncLock=true;
-  for(const el of panes())el.scrollTop=el.scrollHeight;
-  clearTimeout(syncRelease);syncRelease=setTimeout(()=>{syncLock=false;},0);
+  for(const el of panes())el.scrollTop=Math.max(0,el.scrollHeight-el.clientHeight);
+  clearTimeout(syncRelease);
+  syncRelease=setTimeout(()=>{syncLock=false;},0);
+}
+function followLatest(){
+  if(!$('follow').checked||manualBrowsing)return;
+  scrollToLatest();
+  cancelAnimationFrame(followFrame);
+  // Layout/font changes after a redraw can increase either pane's scroll height.
+  followFrame=requestAnimationFrame(()=>{
+    scrollToLatest();
+    followFrame=requestAnimationFrame(scrollToLatest);
+  });
+}
+function markManualBrowsing(){
+  if($('follow').checked)manualBrowsing=true;
+}
+for(const el of panes()){
+  el.addEventListener('wheel',markManualBrowsing,{passive:true});
+  el.addEventListener('touchstart',markManualBrowsing,{passive:true});
+  el.addEventListener('pointerdown',event=>{
+    // A scrollbar drag is deliberate browsing; row clicks keep their own behavior.
+    if(event.target===el)markManualBrowsing();
+  });
+  el.addEventListener('keydown',event=>{
+    if(['ArrowUp','ArrowDown','PageUp','PageDown','Home','End',' '].includes(event.key))
+      markManualBrowsing();
+  });
 }
 function matchingRow(root,id){return [...root.querySelectorAll('.entry')].find(n=>n.dataset.entryId===String(id));}
 function syncScroll(source,target){
@@ -52,7 +78,9 @@ function syncScroll(source,target){
 }
 function onPaneScroll(source,target){
   if(syncLock)return;
-  manualBrowsing=!bottom(source);
+  // Do not mistake layout changes or our own follow-to-bottom for user scrolling.
+  if($('follow').checked&&!manualBrowsing)return;
+  if(manualBrowsing&&bottom(source)&&bottom(target))manualBrowsing=false;
   syncLock=true;
   syncScroll(source,target);
   clearTimeout(syncRelease);syncRelease=setTimeout(()=>{syncLock=false;},0);
@@ -87,7 +115,7 @@ function draw(){
       p.dataset.entryId=String(e.id);
       p.className='entry'+(field==='translated'?' translation':'')+
         (!e.translated&&field==='translated'?' pending':'')+(e.error&&field==='translated'?' error':'')+
-        (field==='translated'&&e.translated&&e.translatedKey!==translationKey(e)?' updating':'');
+        (field==='translated'&&e.translated&&(e.translatedKey!==translationKey(e)||e.forceRetranslate||activeEntries.has(e))?' updating':'');
       if(hoveredEntryId===String(e.id))p.classList.add('paired-hover');
       p.tabIndex=0;
       p.setAttribute('role','button');
@@ -97,7 +125,18 @@ function draw(){
       who.textContent=e.speaker||'未知发言人';
       const time=document.createElement('time');time.textContent=new Date(e.at).toLocaleTimeString();
       meta.append(who,time);
-      if(field==='translated'&&e.translated&&e.translatedKey!==translationKey(e)){
+      if(container==='original'){
+        const retry=document.createElement('button');
+        retry.type='button';retry.className='retry-translation';
+        retry.textContent='翻译';retry.title='重新翻译此条字幕';
+        retry.setAttribute('aria-label','重新翻译此条字幕');
+        retry.addEventListener('click',event=>{
+          event.stopPropagation();
+          retryTranslation(e);
+        });
+        meta.append(retry);
+      }
+      if(field==='translated'&&e.translated&&(e.translatedKey!==translationKey(e)||e.forceRetranslate||activeEntries.has(e))){
         const state=document.createElement('span');state.className='update-state';
         state.textContent=e.error?'更新失败':(e.skipped?'已跳过更新':'更新中…');
         meta.append(state);
@@ -112,16 +151,68 @@ function draw(){
       root.append(p);
     }
   }
-  if(shouldFollow){for(const root of panes())root.scrollTop=root.scrollHeight;}
+  if(shouldFollow)followLatest();
   else panes().forEach((root,i)=>{root.scrollTop=oldPositions[i];});
   clearTimeout(syncRelease);syncRelease=setTimeout(()=>{syncLock=false;},0);
 }
 function cancelPending(){
   clearTimeout(queueTimer);queueTimer=null;batchGraceUntil=0;
-  for(const e of entries){e.pendingKey=null;e.readyAt=0;}
+  for(const e of entries){e.pendingKey=null;e.readyAt=0;e.forceRetranslate=false;}
 }
-function reset(){generation++;cancelPending();entries=[];manualBrowsing=false;hoveredEntryId=null;draw();}
+function reset(){
+  generation++;cancelPending();cancelAnimationFrame(followFrame);
+  entries=[];sessionEntries=[];manualBrowsing=false;hoveredEntryId=null;updateSaveButton();draw();
+}
 function updateStatus(s){$('status').textContent=s;}
+function updateSaveButton(){
+  $('save-txt').disabled=sessionEntries.length===0;
+}
+function formatExportTime(ms){
+  const d=new Date(ms);
+  return Number.isNaN(d.getTime())?'时间未知':d.toLocaleString('zh-CN',{hour12:false});
+}
+function fileTimestamp(d){
+  const pad=n=>String(n).padStart(2,'0');
+  return d.getFullYear()+pad(d.getMonth()+1)+pad(d.getDate())+'_'
+    +pad(d.getHours())+pad(d.getMinutes())+pad(d.getSeconds());
+}
+function buildTranscriptText(){
+  const lines=[
+    'Google Meet 双语会议字幕记录',
+    '会议：'+$('meeting').textContent,
+    '保存时间：'+formatExportTime(Date.now()),
+    '原文语言：'+$('source').selectedOptions[0].textContent,
+    '目标语言：'+$('target').selectedOptions[0].textContent,
+    '记录条数：'+sessionEntries.length,
+    '说明：按字幕首次出现的顺序输出；字幕内容为最后一次修订结果。',
+    '==================================================',
+    ''
+  ];
+  for(const [index,e] of sessionEntries.entries()){
+    const translation=e.translatedKey===translationKey(e) && !e.error
+      ? e.translated
+      : (e.error?'[翻译失败或尚未更新]':e.translated?'[译文待更新] '+e.translated:'[未翻译]');
+    lines.push('['+(index+1)+'] '+formatExportTime(e.at)+'  '+(e.speaker||'未知发言人'));
+    lines.push('原文：'+e.text);
+    lines.push('译文：'+translation);
+    lines.push('');
+  }
+  return lines.join('\r\n');
+}
+function saveTranscript(){
+  if(!sessionEntries.length)return;
+  const content='\uFEFF'+buildTranscriptText();
+  const blob=new Blob([content],{type:'text/plain;charset=utf-8'});
+  const url=URL.createObjectURL(blob);
+  const link=document.createElement('a');
+  link.href=url;link.download='Meet_双语字幕_'+fileTimestamp(new Date())+'.txt';
+  document.body.append(link);
+  try{link.click();}
+  finally{
+    link.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),30000);
+  }
+}
 async function locate(){
   const tabs=await chrome.tabs.query({url:'https://meet.google.com/*'});
   const tab=tabs.find(t=>t.active)||tabs[0];
@@ -140,11 +231,22 @@ async function locate(){
     updateStatus('等待会议');$('meeting').textContent='未找到 Meet 标签页';
   }
 }
-// One global worker: at most one HTTP request, newest ready caption first.
+// BytePlus: up to three in-flight requests and three starts per rolling second. Qwen: one.
 // A caption version is (text revision + language pair); only that version is translated.
-let translationBusy=false, queueTimer=null, updateOrder=0, batchGraceUntil=0;
+let translationBusy=0, maxTranslationConcurrency=1, queueTimer=null, updateOrder=0, batchGraceUntil=0;
+const activeEntries=new Set(), requestStarts=[];
 function translationKey(e){
   return JSON.stringify([e.text,$('source').value,$('target').value]);
+}
+function retryTranslation(e){
+  if(!entries.includes(e))return;
+  // A retry of unchanged text must bypass the normal translatedKey deduplication.
+  // Bump the version so an earlier in-flight response cannot overwrite the retry.
+  e.version++;e.error=false;e.skipped=false;
+  e.forceRetranslate=true;e.readyAt=Date.now();
+  e.pendingKey=translationKey(e);
+  e.order=++updateOrder;e.queuedAt=Date.now();
+  draw();pumpTranslations();
 }
 function scheduleTranslation(e){
   e.pendingKey=translationKey(e);
@@ -155,9 +257,14 @@ function scheduleTranslation(e){
   pumpTranslations();
 }
 function pumpTranslations(){
-  if(translationBusy)return;
+  if(translationBusy>=maxTranslationConcurrency)return;
   clearTimeout(queueTimer);queueTimer=null;
-  const all=entries.filter(e=>e.pendingKey&&e.pendingKey!==e.translatedKey);
+  const tick=Date.now();
+  while(requestStarts.length&&tick-requestStarts[0]>=1000)requestStarts.shift();
+  if(maxTranslationConcurrency===3&&requestStarts.length>=3){
+    queueTimer=setTimeout(pumpTranslations,Math.max(1,1000-(tick-requestStarts[0])));return;
+  }
+  const all=entries.filter(e=>e.pendingKey&&(e.forceRetranslate||e.pendingKey!==e.translatedKey)&&!activeEntries.has(e));
   // Real-time mode: never work through a growing backlog of outdated captions.
   all.sort((a,b)=>b.order-a.order);
   const now=Date.now();
@@ -166,7 +273,7 @@ function pumpTranslations(){
     if(queue.length>=MAX_PENDING_JOBS || now-(e.queuedAt||now)>MAX_QUEUE_AGE_MS){
       // Preserve the previous translation; do not replace readable text with a skip marker.
       e.skipped=true;
-      e.pendingKey=null;e.readyAt=0;
+      e.pendingKey=null;e.readyAt=0;e.forceRetranslate=false;
     }else queue.push(e);
   }
   if(!queue.length)return;
@@ -187,14 +294,18 @@ function pumpTranslations(){
   ready.sort((a,b)=>b.order-a.order);
   const e=ready[0],key=e.pendingKey,g=generation,version=e.version;
   const source=$('source').value,target=$('target').value,text=e.text;
-  e.pendingKey=null;e.readyAt=0;
+  e.pendingKey=null;e.readyAt=0;e.forceRetranslate=false;
   if(source===target){
     if(entries.includes(e)&&g===generation&&translationKey(e)===key){
       e.translated=text;e.translatedKey=key;e.error=false;draw();
     }
     pumpTranslations();return;
   }
-  translationBusy=true;
+  translationBusy++;
+  activeEntries.add(e);
+  if(maxTranslationConcurrency===3)requestStarts.push(Date.now());
+  // Fill other free slots without waiting for the first request to complete.
+  if(translationBusy<maxTranslationConcurrency)queueMicrotask(pumpTranslations);
   (async()=>{
     try{
       const res=await fetch('http://127.0.0.1:18765/translate',{
@@ -205,7 +316,7 @@ function pumpTranslations(){
       const j=await res.json();if(!res.ok)throw Error(j.error||'HTTP '+res.status);
       if(g===generation&&entries.includes(e)&&e.version===version&&translationKey(e)===key){
         e.translated=j.translation;e.translatedKey=key;e.error=false;e.skipped=false;
-        $('bridge').textContent='● 本机 Qwen MT 已连接';draw();
+        $('bridge').textContent=maxTranslationConcurrency===3?'● 本机 BytePlus 已连接':'● 本机 Qwen MT 已连接';draw();
       }
     }catch(err){
       if(g===generation&&entries.includes(e)&&e.version===version&&translationKey(e)===key){
@@ -215,7 +326,8 @@ function pumpTranslations(){
         $('bridge').textContent='● 本机服务未就绪';draw();
       }
     }finally{
-      translationBusy=false;
+      translationBusy--;
+      activeEntries.delete(e);
       // A stale response is discarded, then the most recent waiting caption wins.
       pumpTranslations();
     }
@@ -236,7 +348,7 @@ function accept(m){
     e.speaker=speaker||e.speaker;e.at=m.at||Date.now();
   }else{
     e={id:++nextId,key:m.id,text:m.text,speaker,translated:'',version:1,at:m.at||Date.now(),error:false};
-    entries.push(e);scheduleTranslation(e);
+    entries.push(e);sessionEntries.push(e);updateSaveButton();scheduleTranslation(e);
     if(entries.length>MAX){entries.shift();}
   }
   draw();
@@ -266,6 +378,8 @@ $('follow').addEventListener('change',()=>{
   if($('follow').checked){manualBrowsing=false;followLatest();}
 });
 $('clear').addEventListener('click',reset);
+$('save-txt').addEventListener('click',saveTranscript);
+updateSaveButton();
 chrome.tabs.onActivated.addListener(locate);
 chrome.tabs.onUpdated.addListener((id,info)=>{
   if(id===meetTab&&info.status==='loading')reset();
@@ -278,7 +392,11 @@ chrome.storage.local.get({source:'auto',target:'Chinese',follow:true}).then(s=>{
 async function health(){
   try{
     const r=await fetch('http://127.0.0.1:18765/health',{signal:AbortSignal.timeout(1800)});
-    if(!r.ok)throw Error();$('bridge').textContent='● 本机 Qwen MT 已连接';
+    if(!r.ok)throw Error();
+    const info=await r.json();
+    maxTranslationConcurrency=info.model==='seed-translation-250915'?3:1;
+    $('bridge').textContent=maxTranslationConcurrency===3?'● 本机 BytePlus 已连接 (3 并发)':'● 本机 Qwen MT 已连接';
+    pumpTranslations();
   }catch{$('bridge').textContent='○ 请启动 start-bridge.bat';}
 }
 locate();draw();health();setInterval(health,15000);

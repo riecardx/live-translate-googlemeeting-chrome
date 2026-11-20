@@ -7,12 +7,12 @@ const path=require('path');const assert=require('assert');
   await page.setViewport({width:1400,height:850});
   await page.evaluateOnNewDocument(()=>{
    window.__captureEvents=[];
-   window.chrome={runtime:{sendMessage:async m=>{window.__captureEvents.push(m);},onMessage:{addListener:()=>{}}}};
+   window.chrome={runtime:{id:'test-extension-id',sendMessage:async m=>{window.__captureEvents.push(m);},onMessage:{addListener:()=>{}}}};
   });
   await page.goto('about:blank');
   await page.evaluate(()=>{
    window.__captureEvents=[];
-   window.chrome={runtime:{sendMessage:async m=>{window.__captureEvents.push(m);},onMessage:{addListener:()=>{}}}};
+   window.chrome={runtime:{id:'test-extension-id',sendMessage:async m=>{window.__captureEvents.push(m);},onMessage:{addListener:()=>{}}}};
   });
   await page.setContent('<main><div role="region" aria-label="Captions" style="width:350px;height:100px"><div id="caption"><div id="speaker">あなた</div><div id="speech">这个。</div></div></div></main>');
   await page.addScriptTag({path:path.join(__dirname,'content.js')});

@@ -19,3 +19,9 @@ node_modules/
 *.log
 .DS_Store
 Thumbs.db
+
+# Private BytePlus local translation bridge
+/bridge-byteplus.py
+/start-bridge-byteplus.bat
+/test_bridge_byteplus.py
+/test_bridge_byteplus_concurrency.py

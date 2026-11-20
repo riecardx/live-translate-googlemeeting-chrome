@@ -6,7 +6,7 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
  try{
   const page=await browser.newPage();await page.setViewport({width:1400,height:900});
   await page.goto('about:blank');
-  await page.evaluate(()=>window.chrome={runtime:{onMessage:{addListener(){}},sendMessage:async m=>(window.events.push(m))}});
+  await page.evaluate(()=>window.chrome={runtime:{id:'test-extension-id',onMessage:{addListener(){}},sendMessage:async m=>(window.events.push(m))}});
   await page.evaluate(()=>window.events=[]);
   await page.setContent('<div role="region" aria-label="Captions" style="width:600px;height:300px">'+
     '<div class="iOzk7" id="r1"><span class="zs7s8d">金桂善</span><div class="iTTPOb">最初の説明です。</div></div>'+
